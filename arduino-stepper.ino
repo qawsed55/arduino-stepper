@@ -26,19 +26,70 @@ CustomStepper stepper( 14, 12, 13, 15 );
 WiFiClientSecure client;
 
 /**
- * Starts access point mode to allow settings to be changed
- * */
-void startAP() {
-  WiFi.disconnect();
+ * Load a string from a file and load its contents into the given variable 
+ */
+void getFileString( char const fileName[], char* var, int charSize ) {
+  File file = SPIFFS.open( fileName, "r" );
+  if ( ! file ) {
+    Serial.print( "File open for read failed " );
+    Serial.println( fileName );
+  }
 
-  WiFi.mode( WIFI_AP );
-  WiFi.softAP( apSsid );
-  Serial.println( "" );
-  Serial.println( "Started AP with IP " );
-  Serial.println( WiFi.softAPIP() );
+  String string = file.readString();
+  var[0] = (char) 0;
+  file.seek( 0, SeekSet );
+  string.toCharArray( var, charSize );
 
-  server.on( "/", handleRoot );
-  server.begin();
+  file.close();
+}
+
+/**
+ * Save a string to the given file 
+ */
+void setFileString( char const fileName[], String value ) {
+  File file = SPIFFS.open( fileName, "w" );
+  if ( ! file ) {
+    Serial.print( "file open for write failed " );
+    Serial.println( fileName );
+  }
+
+  value.trim();
+
+  // @see: https://github.com/esp8266/Arduino/issues/454
+  value.replace("+", " ");
+  value.replace("%21", "!");
+  value.replace("%23", "#");
+  value.replace("%24", "$");
+  value.replace("%26", "&");
+  value.replace("%27", "'");
+  value.replace("%28", "(");
+  value.replace("%29", ")");
+  value.replace("%2A", "*");
+  value.replace("%2B", "+");
+  value.replace("%2C", ",");
+  value.replace("%2F", "/");
+  value.replace("%3A", ":");
+  value.replace("%3B", ";");
+  value.replace("%3D", "=");
+  value.replace("%3F", "?");
+  value.replace("%40", "@");
+  value.replace("%5B", "[");
+  value.replace("%5D", "]");
+
+  file.print( value );
+
+  file.close();
+}
+
+/**
+ * Load all variables 
+ */
+void populateVars() {
+  getFileString( "/ssid", ssid, sizeof( ssid ) );
+  getFileString( "/pw", pw, sizeof( pw ) );
+  getFileString( "/domain", domain, sizeof( domain ) );
+  getFileString( "/host", host, sizeof( host ) );
+  getFileString( "/path", path, sizeof( path ) );
 }
 
 void handleRoot() {
@@ -81,79 +132,28 @@ void handleRoot() {
   server.send( 200, "text/html", html );
 }
 
+/**
+ * Starts access point mode to allow settings to be changed
+ * */
+void startAP() {
+  WiFi.disconnect();
+
+  WiFi.mode( WIFI_AP );
+  WiFi.softAP( apSsid );
+  Serial.println( "" );
+  Serial.println( "Started AP with IP " );
+  Serial.println( WiFi.softAPIP() );
+
+  server.on( "/", handleRoot );
+  server.begin();
+}
+
 String htmlspecialcharts( String input ) {
   input.replace( "<", "&lt;" );
   input.replace( ">", "&gt" );
   input.replace( "\"", "&quot;" );
   input.replace( "&", "&amp;" );
   return input;
-}
-
-/**
- * Save a string to the given file 
- */
-void setFileString( char const fileName[], String value ) {
-  File file = SPIFFS.open( fileName, "w" );
-  if ( ! file ) {
-    Serial.print( "file open for write failed " );
-    Serial.println( fileName );
-  }
-
-  value.trim();
-
-  // @see: https://github.com/esp8266/Arduino/issues/454
-  value.replace("+", " ");
-  value.replace("%21", "!");
-  value.replace("%23", "#");
-  value.replace("%24", "$");
-  value.replace("%26", "&");
-  value.replace("%27", "'");
-  value.replace("%28", "(");
-  value.replace("%29", ")");
-  value.replace("%2A", "*");
-  value.replace("%2B", "+");
-  value.replace("%2C", ",");
-  value.replace("%2F", "/");
-  value.replace("%3A", ":");
-  value.replace("%3B", ";");
-  value.replace("%3D", "=");
-  value.replace("%3F", "?");
-  value.replace("%40", "@");
-  value.replace("%5B", "[");
-  value.replace("%5D", "]");
-
-  file.print( value );
-
-  file.close();
-}
-
-/**
- * Load a string from a file and load its contents into the given variable 
- */
-void getFileString( char const fileName[], char* var, int charSize ) {
-  File file = SPIFFS.open( fileName, "r" );
-  if ( ! file ) {
-    Serial.print( "File open for read failed " );
-    Serial.println( fileName );
-  }
-
-  String string = file.readString();
-  var[0] = (char) 0;
-  file.seek( 0, SeekSet );
-  string.toCharArray( var, charSize );
-
-  file.close();
-}
-
-/**
- * Load all variables 
- */
-void populateVars() {
-  getFileString( "/ssid", ssid, sizeof( ssid ) );
-  getFileString( "/pw", pw, sizeof( pw ) );
-  getFileString( "/domain", domain, sizeof( domain ) );
-  getFileString( "/host", host, sizeof( host ) );
-  getFileString( "/path", path, sizeof( path ) );
 }
 
 void setPosition( int deg ) {
@@ -250,7 +250,6 @@ void getFromServer() {
     return;
   }
 
-
   // We now create a URI for the request
   String url = String( "https://" );
   url.concat( host );
@@ -293,6 +292,8 @@ void setup() {
 
   if ( LOW == digitalRead( switchPin ) ) {
     apMode = true;
+    // Allow user to release button
+    delay( 2000 );
   }
 
   stepper.setRPM( 3 );
