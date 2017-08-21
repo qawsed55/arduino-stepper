@@ -112,6 +112,48 @@ void handleRoot() {
   // Load variables from storage
   populateVars();
 
+  String wifiStatus = "WiFi Status: ";
+
+  // Set up WiFi if data was updated
+  if ( HTTP_POST == server.method() ) {
+     // Start connection process
+    WiFi.begin( ssid, pw );
+    
+    int tries = 0;
+    // Wait for connectio
+    while ( WiFi.status() != WL_CONNECTED ) {
+      delay( 500 );
+      
+      Serial.print( WiFi.status() );
+      Serial.print( F( "." ) );
+      
+      tries ++;
+      if ( 100 < tries  ) {
+        Serial.println( F( "Could not conntect, timeout" ) );
+        break;  
+      }
+      
+    }
+  }
+
+  // Show current wifi status
+  switch ( WiFi.status() ) {
+    case WL_CONNECTED:
+      wifiStatus += "connected";
+      break;
+    case WL_CONNECT_FAILED:
+      wifiStatus += " connection failed";
+      break;  
+    case WL_NO_SSID_AVAIL:
+      wifiStatus += " AP not available";
+      break;
+    default: 
+      wifiStatus += " not connected";
+      // default is optional
+    break;
+  }
+ 
+
   String html = "<html><body>";
   html += "<h1>Settings</h1>";
   html += "<form method='POST'><table>";
@@ -122,12 +164,14 @@ void handleRoot() {
   html += "<tr><td>Path<td><td><input name='path' type='text' value='%path%'></td></tr>";
   html += "<tr><td><td><td><input type='submit' value='Save'></td></tr>";
   html += "</table></form>";
+  html += "%status%";
   html += "</body></html>";
 
   html.replace( "%ssid%", ssid );
   html.replace( "%domain%", domain );
   html.replace( "%host%", host );
   html.replace( "%path%", path );
+  html.replace( "%status%", wifiStatus );
 
   server.send( 200, "text/html", html );
 }
@@ -138,7 +182,7 @@ void handleRoot() {
 void startAP() {
   WiFi.disconnect();
 
-  WiFi.mode( WIFI_AP );
+  WiFi.mode( WIFI_AP_STA );
   WiFi.softAP( apSsid );
   Serial.println( "" );
   Serial.println( "Started AP with IP " );
@@ -184,6 +228,9 @@ void setPosition( int deg ) {
     return;
   }
 
+  posFile = SPIFFS.open( "/pos", "w" );
+  posFile.print( deg );
+
   int rotate = 0;
 
   if ( currentPos <= deg ) {
@@ -200,44 +247,10 @@ void setPosition( int deg ) {
   }
 
   stepper.rotateDegrees( rotate );
-
-  posFile = SPIFFS.open( "/pos", "w" );
-  posFile.print( deg );
-
   Serial.print( "Rotating: " );
   Serial.println( rotate );
 }
 
-/**
- * Connect to the configured WIFI
- * */
-void connectToWifi() {
-
-  Serial.println();
-  Serial.println();
-  Serial.print( F( "Connecting to " ) );
-  Serial.println ( ssid );
-
-  WiFi.begin( ssid, pw );
-
-  int tries = 0;
-  while ( WiFi.status() != WL_CONNECTED ) {
-    delay( 500 );
-
-    Serial.print( F( "." ) );
-
-    tries ++;
-    if ( 40 < tries  ) {
-      // Reboot if connecting takes to long;
-      ESP.deepSleep( 2500000 );
-    }
-  }
-
-  Serial.println();
-  Serial.println( F( "WiFi connected" ) );
-  Serial.print( F( "IP address: " ) );
-  Serial.println( WiFi.localIP() );
-}
 
 void getFromServer() {
   Serial.println();
@@ -264,6 +277,7 @@ void getFromServer() {
                 "Connection: close\r\n\r\n");
   
   delay( 5000 );
+
   // Needed so available() actually works
   client.readStringUntil( '\n' );
   while ( client.available() ) {
@@ -274,19 +288,22 @@ void getFromServer() {
     }
   }
 
+
   // Response format => {position: 359}
-  client.readStringUntil( ':' );
+  String l2 = client.readStringUntil( ':' );
   
    // Skip first line of response;
   String line = client.readStringUntil( '}' );
-    
+
   setPosition( line.toInt() );
 }
 
 void setup() {
   Serial.begin( 115200 );
+  //Serial.setDebugOutput(true);
 
-  Serial.println( ESP.getFreeHeap() );
+  // Disable access point by default
+  WiFi.mode( WIFI_STA );
 
   pinMode( switchPin, INPUT_PULLUP );
 
@@ -301,6 +318,8 @@ void setup() {
 
   // Start file system
   SPIFFS.begin();
+
+  // Uncomment this to delete flash
   //SPIFFS.format();
 
   if ( apMode ) {
@@ -311,8 +330,9 @@ void setup() {
    // Load variables
   populateVars();
 
-  // Connect
-  connectToWifi();
+  // WiFi is configured in AP mode
+  Serial.print( F( "IP address: " ) );
+  Serial.println( WiFi.localIP() );
 
   // Load data from server and set position
   getFromServer();
@@ -322,21 +342,13 @@ void loop() {
   // Perform stepper motor actions
   stepper.run();
 
-  // Switch off motor once everything is done to reduce power consumption
-  if ( stepper.isDone() ) {
-    digitalWrite( 14, LOW );
-    digitalWrite( 13, LOW );
-    digitalWrite( 12, LOW );
-    digitalWrite( 15, LOW );
-  }
-
   // Enable web server and zeroing in AP mode
   if ( apMode ) {
     if ( LOW == digitalRead( switchPin ) && false == zeroing ) {
       Serial.println("start");
       delay( 100 );
 
-      stepper.setRPM( 1 );
+      stepper.setRPM( 2 );
       stepper.setDirection( CW );
       stepper.rotate();
       zeroing = true;
@@ -361,9 +373,13 @@ void loop() {
 
   // Enter sleep mode once everything is done
   if ( stepper.isDone() ) {
+    // Switch off motor once everything is done to reduce power consumption
+    digitalWrite( 14, LOW );
+    digitalWrite( 13, LOW );
+    digitalWrite( 12, LOW );
+    digitalWrite( 15, LOW );
     Serial.println();
-    Serial.println( "closing WIFI connection" );
-    WiFi.disconnect();
+    Serial.println( "Going to sleep" );
     delay( 1000 );
     ESP.deepSleep( 600 * 1000000 );
   }
