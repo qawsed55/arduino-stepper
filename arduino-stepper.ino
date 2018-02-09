@@ -1,206 +1,91 @@
 #include <CustomStepper.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecure.h>
+#include <DNSServer.h>            //Local DNS Server used for redirecting all requests to the configuration portal
+#include <WiFiManager.h>
 #include <ESP8266WebServer.h>
+#include <ArduinoJson.h>
 #include <FS.h>
+#include <DoubleResetDetector.h>
 
-int switchPin = 4;
+// Number of seconds after reset during which a
+// subseqent reset will be considered a double reset.
+#define DRD_TIMEOUT 3
+
+// RTC Memory Address for the DoubleResetDetector to use
+#define DRD_ADDRESS 0
+
+DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
+
+#define SENSOR_PWR_PIN 4
+#define SENSOR_IN_PIN 5
+#define SWITCH_PIN = 5;
+
+struct {
+  int check;
+  int pos;
+} currentPosition;
 
 // Config variables
 char domain[100];
-char host[100];
 char path[200];
-char ssid[32];
-char pw[63];
-
-
-// AP config
-bool apMode = false;
-const char *apSsid = "clock";
-ESP8266WebServer server( 80 );
 
 // Working variables
-bool zeroing = false;
+bool shouldSaveConfig = false;
+bool zeroingMode = false;
+int targetPosition = 0;
 
 CustomStepper stepper( 14, 12, 13, 15 );
 WiFiClientSecure client;
 
 /**
- * Load a string from a file and load its contents into the given variable 
+ * Commands to the indicator to move to the zero position
  */
-void getFileString( char const fileName[], char* var, int charSize ) {
-  File file = SPIFFS.open( fileName, "r" );
-  if ( ! file ) {
-    Serial.print( "File open for read failed " );
-    Serial.println( fileName );
-  }
+void setToZero() {
+  Serial.println( "setting to 0" );
 
-  String string = file.readString();
-  var[0] = (char) 0;
-  file.seek( 0, SeekSet );
-  string.toCharArray( var, charSize );
+  pinMode( SENSOR_PWR_PIN, OUTPUT );
+  pinMode( SENSOR_IN_PIN, INPUT );
+  Serial.print( "setting to 0" );
+  delay(1000);
+  
+  digitalWrite( SENSOR_PWR_PIN, HIGH );
+  delay(1000);
 
-  file.close();
+  zeroingMode = true;
+
+  stepper.setDirection( CW );
+  stepper.rotate();
 }
 
 /**
- * Save a string to the given file 
+ * Returns the current position of the indicator. If the stored position is invalid the return will be -1 
  */
-void setFileString( char const fileName[], String value ) {
-  File file = SPIFFS.open( fileName, "w" );
-  if ( ! file ) {
-    Serial.print( "file open for write failed " );
-    Serial.println( fileName );
-  }
+int getCurrentPosition() {
+  if ( ! ESP.rtcUserMemoryRead( 4, ( uint32_t* ) &currentPosition, sizeof( currentPosition ) )
+       || 359 != ( currentPosition.pos + currentPosition.check ) )  {
 
-  value.trim();
-
-  // @see: https://github.com/esp8266/Arduino/issues/454
-  value.replace("+", " ");
-  value.replace("%21", "!");
-  value.replace("%23", "#");
-  value.replace("%24", "$");
-  value.replace("%26", "&");
-  value.replace("%27", "'");
-  value.replace("%28", "(");
-  value.replace("%29", ")");
-  value.replace("%2A", "*");
-  value.replace("%2B", "+");
-  value.replace("%2C", ",");
-  value.replace("%2F", "/");
-  value.replace("%3A", ":");
-  value.replace("%3B", ";");
-  value.replace("%3D", "=");
-  value.replace("%3F", "?");
-  value.replace("%40", "@");
-  value.replace("%5B", "[");
-  value.replace("%5D", "]");
-
-  file.print( value );
-
-  file.close();
-}
-
-/**
- * Load all variables 
- */
-void populateVars() {
-  getFileString( "/ssid", ssid, sizeof( ssid ) );
-  getFileString( "/pw", pw, sizeof( pw ) );
-  getFileString( "/domain", domain, sizeof( domain ) );
-  getFileString( "/host", host, sizeof( host ) );
-  getFileString( "/path", path, sizeof( path ) );
-}
-
-void handleRoot() {
- if ( HTTP_POST == server.method() ) {
-    for ( uint8_t i = 0; i < server.args(); i++ ) {
-      if ( server.argName( i ).equals( "ssid" )  ) {
-        setFileString( "/ssid", server.arg( i ) );
-      } else if ( server.argName( i ).equals( "pw" ) ) {
-        setFileString( "/pw", server.arg( i ) );
-      } else if ( server.argName( i ).equals( "domain" ) ) {
-        setFileString( "/domain", server.arg( i ) );
-      } else if ( server.argName( i ).equals( "host" ) ) {
-        setFileString( "/host", server.arg( i ) );
-      } else if ( server.argName( i ).equals( "path" ) ) {
-        setFileString( "/path", server.arg( i ) );
-      }
-    }
-  }
-
-  // Load variables from storage
-  populateVars();
-
-  String wifiStatus = "WiFi Status: ";
-
-  // Set up WiFi if data was updated
-  if ( HTTP_POST == server.method() ) {
-     // Start connection process
-    WiFi.begin( ssid, pw );
-    
-    int tries = 0;
-    // Wait for connectio
-    while ( WiFi.status() != WL_CONNECTED ) {
-      delay( 500 );
-      
-      Serial.print( WiFi.status() );
-      Serial.print( F( "." ) );
-      
-      tries ++;
-      if ( 100 < tries  ) {
-        Serial.println( F( "Could not conntect, timeout" ) );
-        break;  
-      }
-      
-    }
-  }
-
-  // Show current wifi status
-  switch ( WiFi.status() ) {
-    case WL_CONNECTED:
-      wifiStatus += "connected";
-      break;
-    case WL_CONNECT_FAILED:
-      wifiStatus += " connection failed";
-      break;  
-    case WL_NO_SSID_AVAIL:
-      wifiStatus += " AP not available";
-      break;
-    default: 
-      wifiStatus += " not connected";
-      // default is optional
-    break;
+    return -1;
   }
  
-
-  String html = "<html><body>";
-  html += "<h1>Settings</h1>";
-  html += "<form method='POST'><table>";
-  html += "<tr><td>SSID<td><td><input name='ssid' type='text' size='32' value='%ssid%'></td></tr>";
-  html += "<tr><td>Passphrase<td><td><input name='pw' type='password' size='63'></td></tr>";
-  html += "<tr><td>IP/Domain<td><td><input name='domain' type='text' value='%domain%'></td></tr>";
-  html += "<tr><td>Hostname<td><td><input name='host' type='text' value='%host%'></td></tr>";
-  html += "<tr><td>Path<td><td><input name='path' type='text' value='%path%'></td></tr>";
-  html += "<tr><td><td><td><input type='submit' value='Save'></td></tr>";
-  html += "</table></form>";
-  html += "%status%";
-  html += "</body></html>";
-
-  html.replace( "%ssid%", ssid );
-  html.replace( "%domain%", domain );
-  html.replace( "%host%", host );
-  html.replace( "%path%", path );
-  html.replace( "%status%", wifiStatus );
-
-  server.send( 200, "text/html", html );
+  return currentPosition.pos;
 }
 
 /**
- * Starts access point mode to allow settings to be changed
- * */
-void startAP() {
-  WiFi.disconnect();
-
-  WiFi.mode( WIFI_AP_STA );
-  WiFi.softAP( apSsid );
-  Serial.println( "" );
-  Serial.println( "Started AP with IP " );
-  Serial.println( WiFi.softAPIP() );
-
-  server.on( "/", handleRoot );
-  server.begin();
+ * Saves the given position to RTC memory.
+ */
+void saveCurrentPosition( int position ) {
+  currentPosition.pos = position;
+  currentPosition.check = 359 - position;
+  Serial.print( "setting to " );
+  Serial.println( currentPosition.check );
+  ESP.rtcUserMemoryWrite( 4, ( uint32_t* ) &currentPosition, sizeof( currentPosition )  );
 }
 
-String htmlspecialcharts( String input ) {
-  input.replace( "<", "&lt;" );
-  input.replace( ">", "&gt" );
-  input.replace( "\"", "&quot;" );
-  input.replace( "&", "&amp;" );
-  return input;
-}
-
-void setPosition( int deg ) {
+/**
+ * Set the indicator to the given position
+ */
+void setPosition( int deg, int currentPosition ) {
   // Check for out of range values
   if ( deg < 0 || deg > 359 ) {
     Serial.print( "Invalid position: " );
@@ -213,11 +98,7 @@ void setPosition( int deg ) {
   Serial.print( "Set to: " );
   Serial.println( deg );
 
-  File posFile;
-
-  posFile = SPIFFS.open( "/pos", "r" );
-
-  int currentPos = posFile.readString().toInt();
+  int currentPos = getCurrentPosition();
 
   Serial.print( "Current: " );
   Serial.println( currentPos );
@@ -228,11 +109,7 @@ void setPosition( int deg ) {
     return;
   }
 
-  posFile = SPIFFS.open( "/pos", "w" );
-  posFile.print( deg );
-
   int rotate = 0;
-
   if ( currentPos <= deg ) {
     rotate = deg - currentPos;
   } else {
@@ -251,21 +128,23 @@ void setPosition( int deg ) {
   Serial.println( rotate );
 }
 
-
-void getFromServer() {
+/**
+ * Fetches the target position from the configured web server 
+ */
+int getFromServer() {
   Serial.println();
   Serial.print( F( "connecting to " ) );
   Serial.println( domain );
-  
+
   // WiFiClientSecure client;
-   if ( ! client.connect( domain, 443 ) ) {
+  if ( ! client.connect( domain, 443 ) ) {
     Serial.println( F( "connection failed" ) );
-    return;
+    return - 1;
   }
 
   // We now create a URI for the request
   String url = String( "https://" );
-  url.concat( host );
+  url.concat( domain );
   url.concat( path );
 
   Serial.print( "Requesting URL: " );
@@ -273,9 +152,9 @@ void getFromServer() {
 
   // This will send the request to the server
   client.print( String( "GET " ) + url + " HTTP/1.1\r\n" +
-                "Host: " + host + "\r\n" +
-                "Connection: close\r\n\r\n");
-  
+                "Host: " + domain + "\r\n" +
+                "Connection: close\r\n\r\n" );
+
   delay( 5000 );
 
   // Needed so available() actually works
@@ -288,54 +167,142 @@ void getFromServer() {
     }
   }
 
-
   // Response format => {position: 359}
   String l2 = client.readStringUntil( ':' );
-  
-   // Skip first line of response;
+
+  // Skip first line of response;
   String line = client.readStringUntil( '}' );
 
-  setPosition( line.toInt() );
+  Serial.print( "Server said move to " );
+  Serial.println( line );
+
+  return line.toInt();
+}
+
+/**
+ * Loads the configuration from SPIFFS
+ */
+void loadConfig() {
+  if ( ! SPIFFS.begin() ) {
+    Serial.println( "failed to mount FS" );
+    return;
+  }
+
+  Serial.println( "mounted file system" );
+
+  if ( ! SPIFFS.exists( "/config.json" ) ) {
+    Serial.println( "config.json does not exist" );
+    return;
+  }
+
+  File configFile = SPIFFS.open( "/config.json", "r" );
+  if ( ! configFile ) {
+    Serial.println( "config.json could not be loaded" );
+    return;
+  }
+
+  Serial.println( "opened config file" );
+  size_t size = configFile.size();
+
+  // Allocate a buffer to store contents of the file.
+  std::unique_ptr<char[]> buf(new char[size]);
+
+  configFile.readBytes(buf.get(), size);
+  DynamicJsonBuffer jsonBuffer;
+  JsonObject& json = jsonBuffer.parseObject(buf.get());
+  json.printTo(Serial);
+  if ( ! json.success() ) {
+    Serial.println( "config.json is invalid" );
+    return;
+  }
+
+  Serial.println("\nparsed json");
+
+  strcpy( domain, json["domain"] );
+  strcpy( path, json["path"] );
+}
+
+/**
+ * Saves the configuration
+ */ 
+void saveConfig() {
+  Serial.println( "Saving configuration" );
+  DynamicJsonBuffer jsonBuffer;
+  JsonObject& json = jsonBuffer.createObject();
+
+  json["domain"] = domain;
+  json["path"] = path;
+
+  File configFile = SPIFFS.open( "/config.json", "w" );
+  if ( ! configFile ) {
+    Serial.println( "Failed to open config file for writing" );
+  }
+
+  json.printTo(Serial);
+  json.printTo(configFile);
+  configFile.close();
+}
+
+/**
+ * Callback function so set shouldSaveConfig variable
+ */
+void saveConfigCallback () {
+  Serial.println( "Should save config" );
+  shouldSaveConfig = true;
 }
 
 void setup() {
   Serial.begin( 115200 );
-  //Serial.setDebugOutput(true);
-
-  // Disable access point by default
-  WiFi.mode( WIFI_STA );
-
-  pinMode( switchPin, INPUT_PULLUP );
-
-  if ( LOW == digitalRead( switchPin ) ) {
-    apMode = true;
-    // Allow user to release button
-    delay( 2000 );
-  }
 
   stepper.setRPM( 3 );
   stepper.setDirection( CW );
 
-  // Start file system
-  SPIFFS.begin();
+  loadConfig();
 
-  // Uncomment this to delete flash
-  //SPIFFS.format();
+  WiFiManagerParameter custom_domain( "domain", "Domain name e.g. www.kjero.com", domain, 100 );
+  WiFiManagerParameter custom_path( "path", "Path. e.g /wp-admin/admin-ajax.php?action=stepper&key=YOURKEY", path, 200);
 
-  if ( apMode ) {
-    startAP();
-    return;
+  //WiFiManager
+  //Local intialization. Once its business is done, there is no need to keep it around
+  WiFiManager wifiManager;
+  wifiManager.setSaveConfigCallback( saveConfigCallback );
+
+  wifiManager.setDebugOutput(true);
+
+  wifiManager.addParameter( &custom_domain );
+  wifiManager.addParameter( &custom_path );
+
+  if ( drd.detectDoubleReset() ) {
+    wifiManager.startConfigPortal( "Clock display", "kjero_clock" );
+    ESP.reset();
+  } else if ( ! wifiManager.autoConnect( "Clock display", "kjero_clock" ) ) {
+   
+    Serial.println( "failed to connect and hit timeout" );
+   
+    delay(5000);
+    ESP.deepSleep( 600 * 1000000 );
   }
 
-   // Load variables
-  populateVars();
+  if ( shouldSaveConfig ) {
+    strcpy(domain, custom_domain.getValue());
+    strcpy(path, custom_path.getValue());
+    saveConfig();
+  }
 
-  // WiFi is configured in AP mode
-  Serial.print( F( "IP address: " ) );
-  Serial.println( WiFi.localIP() );
+  //pinMode( switchPin, INPUT_PULLUP );
 
-  // Load data from server and set position
-  getFromServer();
+  targetPosition = getFromServer();
+  int currentPosition = getCurrentPosition();
+
+  Serial.print( "Current position:" );
+  Serial.println( currentPosition );
+
+  if ( -1 == currentPosition ) {
+    setToZero();
+  } else {
+    setPosition( targetPosition, currentPosition );
+  }
+
 }
 
 void loop() {
@@ -343,36 +310,20 @@ void loop() {
   stepper.run();
 
   // Enable web server and zeroing in AP mode
-  if ( apMode ) {
-    if ( LOW == digitalRead( switchPin ) && false == zeroing ) {
-      Serial.println("start");
-      delay( 100 );
+  if ( true == zeroingMode && 100 > analogRead( A0 ) ) {
+    zeroingMode = false;
+    stepper.setDirection( STOP );
+    digitalWrite( SENSOR_PWR_PIN, LOW );
 
-      stepper.setRPM( 2 );
-      stepper.setDirection( CW );
-      stepper.rotate();
-      zeroing = true;
-      return;
-    }
+    Serial.println( "Zeroing complete" );
 
-    if ( HIGH == digitalRead( switchPin ) && true == zeroing ) {
-      Serial.println("stop");
-
-      stepper.setRPM( 3 );
-      stepper.setDirection( STOP );
-      zeroing = false;
-
-      File posFile = SPIFFS.open( "/pos", "w" );
-      posFile.print( 0 );
-      return;
-    }
-
-    server.handleClient();
-    return;
+    saveCurrentPosition(0);
+    setPosition( targetPosition, 0 );
   }
 
   // Enter sleep mode once everything is done
   if ( stepper.isDone() ) {
+    saveCurrentPosition(targetPosition);
     // Switch off motor once everything is done to reduce power consumption
     digitalWrite( 14, LOW );
     digitalWrite( 13, LOW );
@@ -381,6 +332,6 @@ void loop() {
     Serial.println();
     Serial.println( "Going to sleep" );
     delay( 1000 );
-    ESP.deepSleep( 600 * 1000000 );
+    ESP.deepSleep( 600 * 1000000, WAKE_RF_DEFAULT );
   }
 }
